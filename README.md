@@ -334,4 +334,4 @@ This project runs comfortably within AWS free tier:
 
 **Rahim Abbas**  
 Backend Engineer · AI Automation  
-[GitHub](https://github.com/yourusername) · [LinkedIn](https://linkedin.com/in/yourprofile)
+[GitHub](https://github.com/RahimAbbas55) · [LinkedIn]([https://linkedin.com/in/yourprofile](https://www.linkedin.com/in/rahim-abbas-b5520b258/))
