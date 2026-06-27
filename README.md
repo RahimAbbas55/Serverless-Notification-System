@@ -1,6 +1,6 @@
 # Serverless Notification System
 
-A production-ready serverless notification system built with Python and deployed on AWS Lambda. Sends alerts via **Email (AWS SES)** and **Slack** triggered by HTTP webhooks.
+A production-ready serverless notification system built with Python and deployed on AWS Lambda. Sends alerts via **Email (AWS SES)** and **Slack** triggered by HTTP webhooks, with automatic retry logic and a Dead Letter Queue for fault tolerance.
 
 ---
 
@@ -19,9 +19,22 @@ AWS Lambda (Python 3.12)
       │
       └──── Router
               │
-              ├──── AWS SES ────► Email
+              ├──── AWS SES ────► Email ✓
               │
-              └──── Slack Webhook ────► Slack Channel
+              └──── Slack Webhook ────► Slack Channel ✓
+                          │
+                     (if fails)
+                          │
+                          ▼
+                   SQS notifier-queue
+                          │
+                    (retry up to 3x)
+                          │
+                     (still fails)
+                          │
+                          ▼
+                   SQS notifier-dlq
+                  (stored for inspection)
 ```
 
 ---
@@ -32,6 +45,8 @@ AWS Lambda (Python 3.12)
 - **Alert levels** — `info`, `warning`, `error`, `critical` with distinct colors and emojis per channel
 - **Payload validation** — rejects malformed requests before touching any notification service
 - **Per-channel fault isolation** — if one channel fails, others still fire
+- **Automatic retry with SQS** — failed notifications are queued in SQS and retried up to 3 times automatically
+- **Dead Letter Queue** — messages that fail all 3 retries are stored in a DLQ for manual inspection and replay
 - **CloudWatch logging** — every invocation logged with payload and result
 - **Styled HTML emails** — color-coded headers based on alert level
 - **Slack Block Kit messages** — structured, readable alerts with emoji badges
@@ -46,7 +61,9 @@ AWS Lambda (Python 3.12)
 | Compute | AWS Lambda |
 | Email | AWS SES (Simple Email Service) |
 | Messaging | Slack Incoming Webhooks |
-| HTTP trigger | AWS API Gateway (HTTP API) |
+| HTTP Trigger | AWS API Gateway (HTTP API) |
+| Retry Queue | AWS SQS (Simple Queue Service) |
+| Dead Letter Queue | AWS SQS DLQ |
 | Logging | AWS CloudWatch |
 
 ---
@@ -62,6 +79,12 @@ AWS Lambda (Python 3.12)
 ### Slack Notifications
 ![Slack](screenshots/slack.png)
 
+### SQS & DLQ Queue
+![SQS](screenshots/queue.png)
+
+### Cloud Watch Logs for Queue
+![CloudWatch](screenshots/Cloud_watch_queue_logs.png)
+
 ---
 
 ## Project Structure
@@ -70,7 +93,8 @@ AWS Lambda (Python 3.12)
 serverless-notifier/
 ├── src/
 │   ├── __init__.py
-│   ├── handler.py              # Lambda entry point
+│   ├── handler.py              # Lambda entry point + SQS event router
+│   ├── sqs_handler.py          # SQS retry handler with batch failure support
 │   ├── validators.py           # Payload validation
 │   ├── router.py               # Channel dispatcher
 │   └── notifiers/
@@ -101,7 +125,7 @@ serverless-notifier/
 
 ```bash
 git clone https://github.com/RahimAbbas55/Serverless-Notification-System.git
-cd serverless-notifier
+cd Serverless-Notification-System
 ```
 
 ### 2. Install dependencies
@@ -117,6 +141,7 @@ Create a `.env` file in the project root:
 ```bash
 SES_SENDER_EMAIL=your-verified-email@gmail.com
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+SQS_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/YOUR_ACCOUNT_ID/notifier-queue
 ```
 
 ### 4. AWS SES Setup
@@ -133,11 +158,20 @@ SLACK_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
 3. Add New Webhook to Workspace → select a channel → Allow
 4. Copy the webhook URL
 
-### 6. IAM Role
+### 6. SQS Setup
+
+1. Go to **AWS Console → SQS → Create queue**
+2. Select **Standard**, name it `notifier-dlq`, set retention to **14 days** → Create queue
+3. Create another queue named `notifier-queue`
+4. Under **Dead-letter queue** → Enabled → select `notifier-dlq` → Maximum receives `3` → Create queue
+5. Copy the `notifier-queue` URL — you'll need it as the `SQS_QUEUE_URL` environment variable
+
+### 7. IAM Role
 
 Create a Lambda execution role with these permissions:
 
-- `AWSLambdaBasicExecutionRole` (AWS managed policy)
+- `AWSLambdaBasicExecutionRole` — CloudWatch logs
+- `AWSLambdaSQSQueueExecutionRole` — read from SQS (for retry handler)
 - Inline policy for SES:
 
 ```json
@@ -146,17 +180,29 @@ Create a Lambda execution role with these permissions:
   "Statement": [
     {
       "Effect": "Allow",
-      "Action": [
-        "ses:SendEmail",
-        "ses:SendRawEmail"
-      ],
+      "Action": ["ses:SendEmail", "ses:SendRawEmail"],
       "Resource": "*"
     }
   ]
 }
 ```
 
-### 7. Deploy to Lambda
+- Inline policy for SQS send:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["sqs:SendMessage", "sqs:GetQueueAttributes"],
+      "Resource": "arn:aws:sqs:us-east-1:YOUR_ACCOUNT_ID:notifier-queue"
+    }
+  ]
+}
+```
+
+### 8. Deploy to Lambda
 
 **Package the code:**
 
@@ -174,13 +220,48 @@ zip -r function.zip src/
 6. Add environment variables:
    - `SES_SENDER_EMAIL`
    - `SLACK_WEBHOOK_URL`
+   - `SQS_QUEUE_URL`
 
-### 8. Attach API Gateway
+### 9. Attach API Gateway
 
 1. Lambda → Configuration → Triggers → Add trigger
 2. Select API Gateway → Create new API → HTTP API
 3. Security: Open → Add
 4. Copy the generated endpoint URL
+
+### 10. Attach SQS Trigger
+
+1. Lambda → Configuration → Triggers → Add trigger
+2. Select SQS → choose `notifier-queue`
+3. Batch size → `10`
+4. Toggle **Report batch item failures** → On
+5. Click Add
+
+---
+
+## How the Retry Flow Works
+
+```
+1. Notification fails (Slack down, SES rejected, network timeout)
+        │
+        ▼
+2. handler.py detects failure → sends payload to notifier-queue (202 response)
+        │
+        ▼
+3. SQS trigger fires sqs_handler.py automatically
+        │
+        ▼
+4. sqs_handler retries the notification
+        │
+        ├── Success → message deleted from queue ✓
+        │
+        └── Fail → SQS retries up to 3 times total
+                        │
+                        └── Still failing → message moved to notifier-dlq
+                                                │
+                                                └── Stored for 14 days
+                                                    Fix the bug → replay manually
+```
 
 ---
 
@@ -243,7 +324,7 @@ curl -X POST <your-endpoint> \
 | `recipient` | `string` | Email only | Recipient email address |
 | `level` | `string` | No | `info`, `warning`, `error`, `critical` (default: `info`) |
 
-### Response
+### Success Response (`200`)
 
 ```json
 {
@@ -255,7 +336,19 @@ curl -X POST <your-endpoint> \
 }
 ```
 
-### Error Response
+### Queued for Retry Response (`202`)
+
+```json
+{
+  "status": "queued_for_retry",
+  "results": {
+    "slack": { "success": false, "error": "HTTP 403: invalid_token" }
+  },
+  "queue": { "queued": true, "message_id": "c6520aa1..." }
+}
+```
+
+### Validation Error Response (`400`)
 
 ```json
 {
@@ -312,6 +405,7 @@ This project runs comfortably within AWS free tier:
 | Lambda | 1M requests/month | Negligible for personal use |
 | SES | 62,000 emails/month | Negligible for personal use |
 | API Gateway | 1M requests/month | Negligible for personal use |
+| SQS | 1M requests/month | Negligible for personal use |
 | CloudWatch | 5GB logs/month | Negligible for personal use |
 
 **Idle cost: $0.00** — Lambda charges only on invocations, never for sitting idle.
@@ -325,6 +419,8 @@ This project runs comfortably within AWS free tier:
 - AWS SES email verification and sandbox mode
 - Slack Block Kit message formatting
 - IAM roles and least-privilege permissions
+- SQS queues, dead letter queues, and retry mechanisms
+- Partial batch failure handling in Lambda SQS triggers
 - CloudWatch logging for serverless debugging
 - Packaging Python code for Lambda deployment
 
@@ -332,6 +428,6 @@ This project runs comfortably within AWS free tier:
 
 ## Author
 
-**Rahim Abbas**  
-Backend Engineer · AI Automation  
-[GitHub](https://github.com/RahimAbbas55) · [LinkedIn]([https://linkedin.com/in/yourprofile](https://www.linkedin.com/in/rahim-abbas-b5520b258/))
+**Rahim Abbas**
+Backend Engineer · AI Automation
+[GitHub](https://github.com/RahimAbbas55) · [LinkedIn](https://www.linkedin.com/in/rahim-abbas-b5520b258/)

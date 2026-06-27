@@ -76,6 +76,6 @@ def send_slack(message: str , level: str = "info" , subject: str | None = None )
                 return { "success" : True }
             return { "success" : False , "error" : body }
     except urllib.error.HTTPError as e:
-        return { "success" : False , f"HTTP Error {e.code}" : {e.read().decode() } }
+        return {"success": False, "error": f"HTTP {e.code}: {e.read().decode()}"}
     except urllib.error.URLError as e:
         return { "success" : False , "error" : str(e.reason)}

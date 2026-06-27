@@ -9,6 +9,10 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 def lambda_handler(event , context):
+    # Detect if this is an SQS event
+    if event.get("Records") and event["Records"][0].get("eventSource") == "aws:sqs":
+        from src.sqs_handler import sqs_handler
+        return sqs_handler(event, context)
     try: 
         body = event.get("body" , {})
         if isinstance(body , str):
@@ -24,7 +28,10 @@ def lambda_handler(event , context):
                 "details" : errors
             })
         results = route_notification(payload)
-        any_failed = any(not r.get("success") for r in results)
+        any_failed = any(
+            not (r.get("success") if isinstance(r, dict) else False)
+            for r in results.values()
+        )
         if any_failed:
             # Send to SQS for retry
             queue_result = send_to_sqs(payload)
