@@ -100,7 +100,7 @@ serverless-notifier/
 ### 1. Clone the repo
 
 ```bash
-git clone https://github.com/yourusername/serverless-notifier.git
+git clone https://github.com/RahimAbbas55/Serverless-Notification-System.git
 cd serverless-notifier
 ```
 
