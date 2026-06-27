@@ -1,5 +1,7 @@
+import os
 import json
 import logging
+import boto3
 from src.router import route_notification
 from src.validators import validate_webhook_payload
 
@@ -22,6 +24,15 @@ def lambda_handler(event , context):
                 "details" : errors
             })
         results = route_notification(payload)
+        any_failed = any(not r.get("success") for r in results)
+        if any_failed:
+            # Send to SQS for retry
+            queue_result = send_to_sqs(payload)
+            return _response(202 , {
+                "status" : "queued_for_retry",
+                "results" : results,
+                "queue" : queue_result
+            })
         return _response(200 , {
                 "status" : "sent",
                 "results" : results
@@ -32,6 +43,7 @@ def lambda_handler(event , context):
         logger.error(f"Error processing request: {str(e)}")
         return _response(500, {"error": "Internal server error"})
 
+# Helper function for the main lambda_handler to format the response
 def _response(status_code: int , body: dict) -> dict:
     return{
         "statusCode" : status_code,
@@ -40,3 +52,28 @@ def _response(status_code: int , body: dict) -> dict:
         },
         "body" : json.dumps(body)
     }
+# Helper function to send messages to SQS
+def send_to_sqs(payload: dict) -> dict:
+    try:
+        queue_url = os.environ["SQS_QUEUE_URL"]
+        sqs_client = boto3.client("sqs" , region_name=os.environ.get("AWS_REGION" , "us-east-1"))
+        # Sending message to SQS
+        response = sqs_client.send_message(
+            QueueUrl = queue_url,
+            MessageBody = json.dumps(payload)
+        )
+        # Extracting the message ID from the response
+        message_id = response["MessageId"]
+        # Log the message ID for tracking
+        logger.info(f"Message sent to SQS queue. Message ID : {message_id}")
+        # Return the details along with message ID
+        return {
+            "queued" : True,
+            "message_id" : message_id
+        }
+    except Exception as e:
+        logger.error(f"Failed to send payload to SQS queue")
+        return {
+            "queued" : True,
+            "error" : str(e)
+        }
