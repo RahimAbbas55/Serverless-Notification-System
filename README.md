@@ -35,6 +35,9 @@ AWS Lambda (Python 3.12)
                           ▼
                    SQS notifier-dlq
                   (stored for inspection)
+                          │
+                          ▼
+                   Dashboard UI ────► Replay button
 ```
 
 ---
@@ -45,11 +48,12 @@ AWS Lambda (Python 3.12)
 - **Alert levels** — `info`, `warning`, `error`, `critical` with distinct colors and emojis per channel
 - **Payload validation** — rejects malformed requests before touching any notification service
 - **Per-channel fault isolation** — if one channel fails, others still fire
-- **Automatic retry with SQS** — failed notifications are queued in SQS and retried up to 3 times automatically
-- **Dead Letter Queue** — messages that fail all 3 retries are stored in a DLQ for manual inspection and replay
+- **Automatic retry with SQS** — failed notifications queued and retried up to 3 times automatically
+- **Dead Letter Queue** — messages that fail all 3 retries stored for manual inspection and replay
 - **CloudWatch logging** — every invocation logged with payload and result
 - **Styled HTML emails** — color-coded headers based on alert level
-- **Slack Block Kit messages** — structured, readable alerts with emoji badges
+- **Slack Block Kit messages** — structured alerts with emoji badges
+- **React dashboard** — send notifications, view logs, and replay DLQ messages from a UI
 
 ---
 
@@ -65,6 +69,7 @@ AWS Lambda (Python 3.12)
 | Retry Queue | AWS SQS (Simple Queue Service) |
 | Dead Letter Queue | AWS SQS DLQ |
 | Logging | AWS CloudWatch |
+| Dashboard | React + Vite + TypeScript |
 
 ---
 
@@ -82,8 +87,8 @@ AWS Lambda (Python 3.12)
 ### SQS & DLQ Queue
 ![SQS](screenshots/queue.png)
 
-### Cloud Watch Logs for Queue
-![CloudWatch](screenshots/Cloud_watch_queue_logs.png)
+### CloudWatch Logs for Queue
+![CloudWatch Queue](screenshots/Cloud_watch_queue_logs.png)
 
 ---
 
@@ -93,10 +98,14 @@ AWS Lambda (Python 3.12)
 serverless-notifier/
 ├── src/
 │   ├── __init__.py
-│   ├── handler.py              # Lambda entry point + SQS event router
+│   ├── handler.py              # Lambda entry point + path router
 │   ├── sqs_handler.py          # SQS retry handler with batch failure support
 │   ├── validators.py           # Payload validation
 │   ├── router.py               # Channel dispatcher
+│   ├── api/
+│   │   ├── __init__.py
+│   │   ├── logs_handler.py     # CloudWatch logs endpoint
+│   │   └── dlq_handler.py      # DLQ read + replay endpoints
 │   └── notifiers/
 │       ├── __init__.py
 │       ├── email_notifier.py   # AWS SES integration
@@ -142,6 +151,7 @@ Create a `.env` file in the project root:
 SES_SENDER_EMAIL=your-verified-email@gmail.com
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
 SQS_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/YOUR_ACCOUNT_ID/notifier-queue
+DLQ_URL=https://sqs.us-east-1.amazonaws.com/YOUR_ACCOUNT_ID/notifier-dlq
 ```
 
 ### 4. AWS SES Setup
@@ -164,14 +174,15 @@ SQS_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/YOUR_ACCOUNT_ID/notifier-queue
 2. Select **Standard**, name it `notifier-dlq`, set retention to **14 days** → Create queue
 3. Create another queue named `notifier-queue`
 4. Under **Dead-letter queue** → Enabled → select `notifier-dlq` → Maximum receives `3` → Create queue
-5. Copy the `notifier-queue` URL — you'll need it as the `SQS_QUEUE_URL` environment variable
+5. Copy both queue URLs for environment variables
 
 ### 7. IAM Role
 
 Create a Lambda execution role with these permissions:
 
 - `AWSLambdaBasicExecutionRole` — CloudWatch logs
-- `AWSLambdaSQSQueueExecutionRole` — read from SQS (for retry handler)
+- `AWSLambdaSQSQueueExecutionRole` — read from SQS
+- `CloudWatchLogsReadOnlyAccess` — read logs for dashboard
 - Inline policy for SES:
 
 ```json
@@ -202,6 +213,26 @@ Create a Lambda execution role with these permissions:
 }
 ```
 
+- Inline policy for DLQ access:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueAttributes",
+        "sqs:ChangeMessageVisibility"
+      ],
+      "Resource": "arn:aws:sqs:us-east-1:YOUR_ACCOUNT_ID:notifier-dlq"
+    }
+  ]
+}
+```
+
 ### 8. Deploy to Lambda
 
 **Package the code:**
@@ -217,10 +248,12 @@ zip -r function.zip src/
 3. Permissions: Use existing role → select your IAM role
 4. Upload the `function.zip`
 5. Set handler to `src.handler.lambda_handler`
-6. Add environment variables:
+6. Set timeout to **30 seconds** (Configuration → General configuration)
+7. Add environment variables:
    - `SES_SENDER_EMAIL`
    - `SLACK_WEBHOOK_URL`
    - `SQS_QUEUE_URL`
+   - `DLQ_URL`
 
 ### 9. Attach API Gateway
 
@@ -228,8 +261,24 @@ zip -r function.zip src/
 2. Select API Gateway → Create new API → HTTP API
 3. Security: Open → Add
 4. Copy the generated endpoint URL
+5. Go to API Gateway → CORS → Configure:
+   - Allow Origin: `*`
+   - Allow Headers: `content-type`
+   - Allow Methods: `GET,POST,OPTIONS`
 
-### 10. Attach SQS Trigger
+### 10. Add API Gateway Routes
+
+In API Gateway → Routes, add:
+
+```
+GET  /Serverless-Notifier/logs
+GET  /Serverless-Notifier/dlq
+POST /Serverless-Notifier/dlq/replay
+```
+
+Attach Lambda integration to each route.
+
+### 11. Attach SQS Trigger
 
 1. Lambda → Configuration → Triggers → Add trigger
 2. Select SQS → choose `notifier-queue`
@@ -260,57 +309,55 @@ zip -r function.zip src/
                         └── Still failing → message moved to notifier-dlq
                                                 │
                                                 └── Stored for 14 days
-                                                    Fix the bug → replay manually
+                                                    Fix the bug → replay via UI
 ```
 
 ---
 
 ## API Reference
 
-**Endpoint:** `POST https://<api-id>.execute-api.<region>.amazonaws.com/default/Serverless-Notifier`
+**Base URL:** `https://<api-id>.execute-api.<region>.amazonaws.com/default`
 
-**Headers:**
-```
-Content-Type: application/json
-```
-
-### Send to Slack
+### Send Notification
 
 ```bash
-curl -X POST <your-endpoint> \
+POST /Serverless-Notifier
+```
+
+```bash
+curl -X POST <base-url>/Serverless-Notifier \
   -H "Content-Type: application/json" \
   -d '{
     "channel": "slack",
-    "message": "Deployment to production completed.",
+    "message": "Deployment complete",
     "level": "info"
   }'
 ```
 
-### Send to Email
+### Fetch Logs
 
 ```bash
-curl -X POST <your-endpoint> \
-  -H "Content-Type: application/json" \
-  -d '{
-    "channel": "email",
-    "recipient": "someone@example.com",
-    "subject": "High CPU Alert",
-    "message": "CPU usage on prod-1 exceeded 90% for 5 minutes.",
-    "level": "warning"
-  }'
+GET /Serverless-Notifier/logs
 ```
 
-### Send to Both Channels
+### Fetch DLQ Messages
 
 ```bash
-curl -X POST <your-endpoint> \
+GET /Serverless-Notifier/dlq
+```
+
+### Replay DLQ Message
+
+```bash
+POST /Serverless-Notifier/dlq/replay
+```
+
+```bash
+curl -X POST <base-url>/Serverless-Notifier/dlq/replay \
   -H "Content-Type: application/json" \
   -d '{
-    "channel": ["email", "slack"],
-    "recipient": "someone@example.com",
-    "subject": "Critical: Database Unreachable",
-    "message": "prod-db-01 has been unreachable for 3 minutes.",
-    "level": "critical"
+    "receiptHandle": "...",
+    "payload": { "channel": "slack", "message": "..." }
   }'
 ```
 
@@ -324,8 +371,9 @@ curl -X POST <your-endpoint> \
 | `recipient` | `string` | Email only | Recipient email address |
 | `level` | `string` | No | `info`, `warning`, `error`, `critical` (default: `info`) |
 
-### Success Response (`200`)
+### Responses
 
+**200 — Sent:**
 ```json
 {
   "status": "sent",
@@ -336,27 +384,20 @@ curl -X POST <your-endpoint> \
 }
 ```
 
-### Queued for Retry Response (`202`)
-
+**202 — Queued for retry:**
 ```json
 {
   "status": "queued_for_retry",
-  "results": {
-    "slack": { "success": false, "error": "HTTP 403: invalid_token" }
-  },
+  "results": { "slack": { "success": false, "error": "HTTP 403" } },
   "queue": { "queued": true, "message_id": "c6520aa1..." }
 }
 ```
 
-### Validation Error Response (`400`)
-
+**400 — Validation error:**
 ```json
 {
   "error": "Invalid payload",
-  "details": [
-    "'recipient' is required when channel includes 'email'",
-    "'subject' is required when channel includes 'email'"
-  ]
+  "details": ["'recipient' is required when channel includes 'email'"]
 }
 ```
 
@@ -373,32 +414,7 @@ curl -X POST <your-endpoint> \
 
 ---
 
-## Local Testing
-
-```bash
-# Test validator
-python -c "
-from src.validators import validate_webhook_payload
-print(validate_webhook_payload({'channel': 'slack', 'message': 'hello'}))
-"
-
-# Test Slack notifier
-python -c "
-import os
-os.environ['SLACK_WEBHOOK_URL'] = 'your-webhook-url'
-from src.notifiers.slack_notifier import send_slack
-print(send_slack('Test message', level='warning', subject='Test'))
-"
-
-# Test full handler
-python test_handler.py
-```
-
----
-
 ## AWS Free Tier Limits
-
-This project runs comfortably within AWS free tier:
 
 | Service | Free Tier | Typical Usage |
 |---|---|---|
@@ -421,8 +437,16 @@ This project runs comfortably within AWS free tier:
 - IAM roles and least-privilege permissions
 - SQS queues, dead letter queues, and retry mechanisms
 - Partial batch failure handling in Lambda SQS triggers
-- CloudWatch logging for serverless debugging
+- CloudWatch Logs API for programmatic log retrieval
+- CORS configuration for API Gateway
+- Path-based routing inside a single Lambda function
 - Packaging Python code for Lambda deployment
+
+---
+
+## Related
+
+- **Dashboard UI:** [Serverless-Notifier-Dashboard](https://github.com/RahimAbbas55/Serverless-Notifier-Dashboard) — React + Vite + TypeScript
 
 ---
 
