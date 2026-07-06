@@ -5,7 +5,7 @@ import boto3
 from src.router import route_notification
 from src.validators import validate_webhook_payload
 from src.api.logs_handler import logs_handler
-from src.api.dlq_handler import get_dlq_messages, replay_dlq_message
+from src.api.dlq_handler import handle_dlq_message, replay_dlq_message
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -24,7 +24,7 @@ def lambda_handler(event, context):
     if path == "/logs" and method == "GET":
         return logs_handler(event, context)
     elif path == "/dlq" and method == "GET":
-        return get_dlq_messages(event, context)
+        return handle_dlq_message(event, context)
     elif path == "/dlq/replay" and method == "POST":
         return replay_dlq_message(event, context)
 
