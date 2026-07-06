@@ -21,11 +21,11 @@ def lambda_handler(event, context):
     method = event.get("requestContext", {}).get("http", {}).get("method", "POST")
 
     # Route to correct handler based on path and method
-    if path == "/logs" and method == "GET":
+    if path.endswith("/logs") and method == "GET":
         return logs_handler(event, context)
-    elif path == "/dlq" and method == "GET":
+    elif path.endswith("/dlq") and method == "GET":
         return handle_dlq_message(event, context)
-    elif path == "/dlq/replay" and method == "POST":
+    elif path.endswith("/dlq/replay") and method == "POST":
         return replay_dlq_message(event, context)
 
     # Default — handle as notification request

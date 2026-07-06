@@ -16,11 +16,11 @@ def handle_dlq_message(event , context):
         )
         dlq_url = os.environ.get("SQS_QUEUE_URL")
         response = sqs.receive_message(
-            QueueUrl = dlq_url,
-            MaxNumberOfMessages = 10,
-            AttributeNames = ['All'],
-            MessageAttributeName = ['All'],
-            VisibilityTimeout = 30
+            QueueUrl=dlq_url,
+            MaxNumberOfMessages=10,
+            MessageSystemAttributeNames=["All"],
+            MessageAttributeNames=["All"],
+            VisibilityTimeout=30
         )
         messages = response.get("Messages", [])
         formatted = []

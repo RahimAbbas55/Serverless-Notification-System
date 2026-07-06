@@ -56,9 +56,16 @@ def logs_handler(event, context):
                     tz=timezone.utc
                 ).strftime("%Y-%m-%d %H:%M:%S UTC")
 
+                # Clean up the message — remove CloudWatch prefix
+                clean_message = message
+                if "\t" in message:
+                    # Format: [LEVEL]\ttimestamp\trequestId\tactual message
+                    parts = message.split("\t")
+                    clean_message = parts[-1] if len(parts) >= 4 else message
+
                 all_events.append({
                     "timestamp": timestamp,
-                    "message": message,
+                    "message": clean_message,
                     "stream": stream_name
                 })
 
