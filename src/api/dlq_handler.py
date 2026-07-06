@@ -33,9 +33,9 @@ def handle_dlq_message(event , context):
                 "receivedCount": msg.get("Attributes", {}).get("ApproximateReceiveCount", "unknown")
             })
         return {
-            'StatusCode' : 200,
+            'statusCode' : 200,
             "headers" : {
-                "Content-Tyep" : "application/json",
+                "Content-Type" : "application/json",
                 "Access-Control-Allow-Origin" : "*"     
             },
             "body" : json.dumps({
